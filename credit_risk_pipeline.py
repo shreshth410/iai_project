@@ -229,15 +229,17 @@ class CreditRiskGameEngine:
         new_state.outcome = None
         return new_state
 
-    def adversary_transition(self, state: BorrowerState) -> BorrowerState:
-        """Adversary deterministically stresses the borrower based on the rate. Terminal."""
+    def adversary_transition(self, state: BorrowerState, action: str) -> BorrowerState:
+        """Adversary picks a stress response."""
         new_state = copy.deepcopy(state)
         stress = max(0, (new_state.interest_rate - 12) / 18)
-        new_state.revolving_utilization = min(
-            1.5, new_state.revolving_utilization + stress * 0.3
-        )
-        new_state.is_terminal = True
-        new_state.outcome = 'approved'
+        if action == 'stress':
+            new_state.revolving_utilization = min(1.5, new_state.revolving_utilization + stress * 0.3 + 0.1)
+        elif action == 'maintain':
+            new_state.revolving_utilization = min(1.5, new_state.revolving_utilization + stress * 0.1)
+        elif action == 'recover':
+            new_state.revolving_utilization = max(0.0, new_state.revolving_utilization - 0.1)
+        new_state.is_terminal = False
         return new_state
 
     def minimax(self, state: BorrowerState, depth: int,
@@ -267,15 +269,22 @@ class CreditRiskGameEngine:
             return max_eval
 
         else:
-            # ── ADVERSARY'S TURN: single deterministic stress response ──
-            # No action loop — adversary just reacts, no branching here
-            next_state = self.adversary_transition(state)
-            new_evidence = self.scorer.get_evidence_keys(next_state)
-            new_p = self.scorer.update(p_default, new_evidence)
+            # ── ADVERSARY'S TURN (MINIMIZING) ──
+            min_eval = math.inf
+            for b_action in ['maintain', 'stress', 'recover']:
+                next_state = self.adversary_transition(state, b_action)
+                new_evidence = self.scorer.get_evidence_keys(next_state)
+                new_p = self.scorer.update(p_default, new_evidence)
 
-            val = self.minimax(next_state, depth - 1,
-                               alpha, beta, True, new_p)
-            return val
+                val = self.minimax(next_state, depth - 1,
+                                   alpha, beta, True, new_p)
+                min_eval = min(min_eval, val)
+                if self.use_alpha_beta:
+                    beta = min(beta, val)
+                    if beta <= alpha:
+                        self.pruned_branches += 1
+                        break
+            return min_eval
 
     def best_action(self, state: BorrowerState) -> tuple:
         p_default = self.scorer.score(state)
@@ -285,6 +294,9 @@ class CreditRiskGameEngine:
         best_val = -math.inf
         best_act = None
         action_values = []
+        
+        alpha = -math.inf
+        beta = math.inf
 
         for action in get_legal_actions(state):
             next_state = self.lender_transition(state, action)
@@ -292,13 +304,16 @@ class CreditRiskGameEngine:
             new_p = self.scorer.update(p_default, new_evidence)
 
             val = self.minimax(next_state, self.max_depth - 1,
-                               -math.inf, math.inf,
+                               alpha, beta,
                                False, new_p)
             action_values.append((action, val))
 
             if val > best_val:
                 best_val = val
                 best_act = action
+            
+            if self.use_alpha_beta:
+                alpha = max(alpha, best_val)
 
         return best_act, best_val, p_default, self.nodes_explored, action_values
 
@@ -321,8 +336,8 @@ def load_and_preprocess(filepath: str) -> tuple:
     print(f"[Data] Missing values:\n{df.isnull().sum()}")
 
     # ── Imputation ──────────────────────────────────
-    df['MonthlyIncome'].fillna(df['MonthlyIncome'].median(), inplace=True)
-    df['NumberOfDependents'].fillna(0, inplace=True)
+    df['MonthlyIncome'] = df['MonthlyIncome'].fillna(df['MonthlyIncome'].median())
+    df['NumberOfDependents'] = df['NumberOfDependents'].fillna(0)
 
     # ── Clip extreme outliers ────────────────────────
     df['RevolvingUtilizationOfUnsecuredLines'] = df[
@@ -600,4 +615,4 @@ def run_pipeline(csv_path: str, n_eval_samples: int = 200, depth: int = 4):
 
 if __name__ == "__main__":
     csv_path = r"D:\codes\Datasets\cs-training.csv"
-    run_pipeline(csv_path, n_eval_samples=200, depth=4)
+    run_pipeline(csv_path, n_eval_samples=2000, depth=4)
